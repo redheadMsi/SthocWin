@@ -1,0 +1,7 @@
+streamlit
+pandas
+finance-datareader
+vectorbt
+pytest
+matplotlib
+plotly
