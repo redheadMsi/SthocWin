@@ -1,0 +1,4 @@
+vectorbt
+duckdb
+pyarrow
+filelock

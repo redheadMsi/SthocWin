@@ -8,19 +8,19 @@ from core_engine import (
     get_kospi200_kosdaq150, 
     get_top100_market_cap, 
     get_top_trading_volume,
-    run_universe_backtest,
-    fetch_stock_data
+    run_universe_backtest
 )
+from data_pipeline import fetch_stock_data_parallel
 
 # --- 캐싱을 활용한 데이터 수집 함수 ---
 @st.cache_data(ttl=3600)
-def fetch_and_filter_universe(universe_choice, target_date_str):
+def fetch_and_filter_universe(universe_choice):
     if universe_choice == "KOSPI 200 / KOSDAQ 150":
         tickers = get_kospi200_kosdaq150()
     else:
-        tickers = get_top100_market_cap(target_date_str)
+        tickers = get_top100_market_cap()
         
-    top10_tickers = get_top_trading_volume(tickers, target_date_str, top_n=10)
+    top10_tickers = get_top_trading_volume(tickers, top_n=10)
     return top10_tickers
 
 st.set_page_config(page_title="파이썬 퀀트 투자 대시보드", layout="wide")
@@ -70,7 +70,7 @@ with col1:
     )
 
     st.markdown("---")
-    run_button = st.button("🚀 실행 (Run Backtest)", use_container_width=True)
+    run_button = st.button("🚀 실행 (Run Backtest)", type="primary")
 
     if run_button:
         # 날짜 범위 유효성 체크
@@ -85,9 +85,8 @@ with col1:
         selected_start_date, selected_end_date = date_range
         
         with st.spinner('선택한 유니버스의 거래대금 상위 10개 종목에 대한 백테스트를 진행 중입니다... (약 10~20초 소요)'):
-            # 유니버스에서 종목을 필터링하는 기준은 종료일을 사용
-            target_date_str = selected_end_date.strftime("%Y%m%d")
-            target_tickers = fetch_and_filter_universe(universe_option, target_date_str)
+            # 유니버스에서 종목을 필터링 (최신 데이터 기준)
+            target_tickers = fetch_and_filter_universe(universe_option)
             
             parsed_params = []
             for p in params_input.split(','):
@@ -143,7 +142,7 @@ with col2:
                     cols[0].metric(label="10종목 평균 누적 수익률", value=f"{avg_return}%", delta=f"{avg_return}%")
                     cols[1].metric(label="평균 승률", value=f"{avg_win_rate}%")
                     
-                    st.dataframe(sub_df[['Name', 'Ticker', 'Return (%)', 'Win Rate (%)', 'Trades']].set_index('Name'), use_container_width=True)
+                    st.dataframe(sub_df[['Name', 'Ticker', 'Return (%)', 'Win Rate (%)', 'Trades']].set_index('Name'), width=None)
                     
                     st.markdown("💡 **아래 막대 그래프에서 종목을 클릭하시면 주가/이평선 차트가 표시됩니다.**")
                     
@@ -158,7 +157,7 @@ with col2:
                     )
                     fig.update_layout(xaxis_title="종목명", yaxis_title="수익률 (%)", clickmode='event+select')
                     
-                    event = st.plotly_chart(fig, on_select="rerun", key=f"chart_{pair_str}", use_container_width=True)
+                    event = st.plotly_chart(fig, on_select="rerun", key=f"chart_{pair_str}")
                     
                     selected_points = event.selection.get("points", []) if hasattr(event, "selection") else []
                     
@@ -168,7 +167,8 @@ with col2:
                         st.subheader(f"📈 {selected_name} 주가 차트 ({pair_str})")
                         
                         with st.spinner(f"{selected_name} 주가 데이터 로딩 중..."):
-                            df_stock = fetch_stock_data(selected_ticker, start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
+                            dfs = fetch_stock_data_parallel([selected_ticker], start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
+                            df_stock = dfs.get(selected_ticker, pd.DataFrame())
                             if not df_stock.empty:
                                 short_w, long_w = map(int, pair_str.split('/'))
                                 df_stock[f'MA_{short_w}'] = df_stock['Close'].rolling(window=short_w).mean()
@@ -185,7 +185,7 @@ with col2:
                                     yaxis_title="주가 (원)",
                                     hovermode='x unified'
                                 )
-                                st.plotly_chart(line_fig, use_container_width=True)
+                                st.plotly_chart(line_fig)
                 else:
                     st.write('결과가 없습니다.')
     else:

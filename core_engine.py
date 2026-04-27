@@ -1,123 +1,100 @@
 import pandas as pd
-import FinanceDataReader as fdr
+import vectorbt as vbt
 import datetime
-from typing import List
+from typing import List, Dict
 
-# 1. 유니버스 추출 (FinanceDataReader로 교체 - pykrx 에러 방지)
-def get_kospi200_kosdaq150() -> List[str]:
-    """KOSPI 200 / KOSDAQ 150 종목 코드 대체 (시가총액 상위 350개로 근사)"""
-    # pykrx의 get_index_portfolio_deposit_file가 KRX 서버 개편으로 동작하지 않으므로 FDR 사용
-    df = fdr.StockListing('KRX')
-    return df.sort_values(by='Marcap', ascending=False).head(350)['Code'].tolist()
+# 새로운 데이터 파이프라인에서 헬퍼 함수 가져오기
+from data_pipeline import (
+    get_kospi200_kosdaq150,
+    get_top100_market_cap,
+    get_top_trading_volume,
+    get_stock_name,
+    fetch_stock_data_parallel
+)
 
-def get_top100_market_cap(date_str: str) -> List[str]:
-    """현재 기준 시가총액 상위 100개 종목 반환"""
-    df = fdr.StockListing('KRX')
-    return df.sort_values(by='Marcap', ascending=False).head(100)['Code'].tolist()
-
-def get_top_trading_volume(tickers: List[str], date_str: str, top_n: int = 10) -> List[str]:
-    """주어진 티커 목록 중 현재 기준 거래대금 상위 N개 추출"""
-    df = fdr.StockListing('KRX')
-    filtered_df = df[df['Code'].isin(tickers)]
-    top_trading = filtered_df.sort_values(by='Amount', ascending=False).head(top_n)['Code'].tolist()
-    return top_trading
-
-def get_stock_name(ticker: str) -> str:
-    """티커로 종목명 가져오기"""
-    try:
-        df = fdr.StockListing('KRX')
-        name = df[df['Code'] == ticker]['Name'].values[0]
-        return name
-    except:
-        return ticker
-
-# 2. 개별 종목 데이터 수집 및 시그널 계산
-def fetch_stock_data(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """FinanceDataReader를 사용하여 일봉 데이터 수집"""
-    df = fdr.DataReader(ticker, start_date, end_date)
-    return df
-
-def run_moving_average_backtest(df: pd.DataFrame, short_window: int, long_window: int) -> dict:
-    """단일 종목에 대한 이동평균선 교차 백테스트 수행 (간단한 버전)"""
-    if len(df) < long_window:
-        return {"return_rate": 0.0, "win_rate": 0.0, "trades": 0}
-
-    # 복사본 사용
-    data = df.copy()
-    data['Short_MA'] = data['Close'].rolling(window=short_window).mean()
-    data['Long_MA'] = data['Close'].rolling(window=long_window).mean()
+def run_vectorbt_backtest(dfs_dict: Dict[str, pd.DataFrame], param_pairs: List[tuple]) -> pd.DataFrame:
+    """
+    VectorBT를 이용한 다중 파라미터 백테스트 병렬 처리.
+    dfs_dict: { '005930': df, '000660': df, ... } 형태
+    """
+    if not dfs_dict:
+        return pd.DataFrame()
+        
+    # 1. 모든 종목의 종가를 하나로 합치기
+    close_df = pd.DataFrame()
+    valid_tickers = []
     
-    # 시그널: Short MA > Long MA 이면 매수 (1), 아니면 매도/관망 (0)
-    data['Signal'] = 0.0
-    # iloc로 처리하여 SettingWithCopyWarning 방지
-    data.iloc[long_window:, data.columns.get_loc('Signal')] = \
-        (data['Short_MA'][long_window:] > data['Long_MA'][long_window:]).astype(float)
-    
-    # 포지션 변화 (1: 매수 진입, -1: 매도 청산)
-    data['Position'] = data['Signal'].diff()
-    
-    trades = []
-    buy_price = 0.0
-    wins = 0
-
-    # 포지션 기반 수익률 계산 시뮬레이션
-    for i in range(len(data)):
-        if data['Position'].iloc[i] == 1:
-            buy_price = data['Close'].iloc[i]
-        elif data['Position'].iloc[i] == -1 and buy_price > 0:
-            sell_price = data['Close'].iloc[i]
-            ret = (sell_price - buy_price) / buy_price
-            trades.append(ret)
-            if ret > 0:
-                wins += 1
-            buy_price = 0.0
+    for ticker, df in dfs_dict.items():
+        if df is None or df.empty:
+            continue
+        if 'Close' not in df.columns:
+            continue
             
-    # 백테스트 종료 시점까지 들고 있는 경우 (Mark to market)
-    if buy_price > 0:
-        sell_price = data['Close'].iloc[-1]
-        ret = (sell_price - buy_price) / buy_price
-        trades.append(ret)
-        if ret > 0:
-            wins += 1
+        # 데이터가 너무 적은 경우(예: 신규상장주) 스킵
+        if len(df) < 5: 
+            continue
+            
+        close_df[ticker] = df['Close']
+        valid_tickers.append(ticker)
+            
+    # 누락 데이터 앞의 값으로 채우고 완전히 빈 행(주말 등) 제거
+    if close_df.empty:
+        return pd.DataFrame()
+        
+    close_df = close_df.ffill().dropna(how='all')
+    if close_df.empty:
+        return pd.DataFrame()
 
-    total_return = sum(trades) * 100 if trades else 0.0
-    win_rate = (wins / len(trades) * 100) if trades else 0.0
-    
-    return {
-        "return_rate": round(total_return, 2),
-        "win_rate": round(win_rate, 2),
-        "trades": len(trades)
-    }
+    results = []
+
+    # 파라미터별 VectorBT 백테스트
+    for short_w, long_w in param_pairs:
+        # 단기/장기 이동평균선 계산
+        fast_ma = vbt.MA.run(close_df, short_w)
+        slow_ma = vbt.MA.run(close_df, long_w)
+        
+        # 교차(Crossover) 시그널 생성
+        entries = fast_ma.ma_crossed_above(slow_ma)
+        exits = fast_ma.ma_crossed_below(slow_ma)
+        
+        # 포트폴리오 생성 (여기서 수수료, 슬리피지 추가 가능 - 0.1% 수수료 예시)
+        pf = vbt.Portfolio.from_signals(
+            close_df,
+            entries,
+            exits,
+            fees=0.001,
+            freq='D'
+        )
+        
+        # 결과 통계 가져오기 (VectorBT가 파라미터를 인덱스로 추가하므로 컬럼 이름만으로 접근할 수 있도록 셋팅)
+        returns = pf.total_return() * 100
+        win_rates = pf.trades.win_rate() * 100
+        total_trades = pf.trades.count()
+        
+        # MultiIndex에서 실제 티커 이름만 매핑하기 위한 딕셔너리 변환 (최종 레벨이 티커)
+        returns_dict = {idx[-1] if isinstance(idx, tuple) else idx: val for idx, val in returns.items()}
+        win_rates_dict = {idx[-1] if isinstance(idx, tuple) else idx: val for idx, val in win_rates.items()}
+        trades_dict = {idx[-1] if isinstance(idx, tuple) else idx: val for idx, val in total_trades.items()}
+        
+        # 결과 정리
+        for ticker in close_df.columns:
+            results.append({
+                "Ticker": ticker,
+                "Name": get_stock_name(ticker),
+                "Params": f"{short_w}/{long_w}",
+                "Return (%)": round(returns_dict.get(ticker, 0.0), 2),
+                "Win Rate (%)": round(win_rates_dict.get(ticker, 0.0), 2) if not pd.isna(win_rates_dict.get(ticker, 0.0)) else 0.0,
+                "Trades": trades_dict.get(ticker, 0)
+            })
+
+    return pd.DataFrame(results)
 
 # 3. 전체 파이프라인 (UI에서 호출)
 def run_universe_backtest(tickers: List[str], param_pairs: List[tuple], start_date: str, end_date: str) -> pd.DataFrame:
-    """여러 종목에 대해 다중 파라미터 백테스트를 수행하고 결과 통합"""
-    results = []
+    """UI에서 호출되는 진입점 - 데이터 병렬 수집 후 VectorBT 엔진 호출"""
+    # 데이터 파이프라인을 통해 병렬로 데이터 로드
+    # 최대 워커 수를 10으로 제한하여 Rate Limit 방어
+    dfs_dict = fetch_stock_data_parallel(tickers, start_date, end_date, max_workers=10)
     
-    # 캐싱용으로 StockListing 한번만 호출
-    krx_list = fdr.StockListing('KRX')
-    
-    for ticker in tickers:
-        try:
-            # 종목명 가져오기
-            try:
-                stock_name = krx_list[krx_list['Code'] == ticker]['Name'].values[0]
-            except:
-                stock_name = ticker
-                
-            df = fetch_stock_data(ticker, start_date, end_date)
-            
-            for short_w, long_w in param_pairs:
-                res = run_moving_average_backtest(df, short_w, long_w)
-                results.append({
-                    "Ticker": ticker,
-                    "Name": stock_name,
-                    "Params": f"{short_w}/{long_w}",
-                    "Return (%)": res["return_rate"],
-                    "Win Rate (%)": res["win_rate"],
-                    "Trades": res["trades"]
-                })
-        except Exception as e:
-            continue
-            
-    return pd.DataFrame(results)
+    # VectorBT 연산 엔진 호출
+    return run_vectorbt_backtest(dfs_dict, param_pairs)
