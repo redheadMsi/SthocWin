@@ -89,10 +89,14 @@ def get_top100_market_cap() -> List[str]:
     return df.sort_values(by='Marcap', ascending=False).head(100)['Code'].tolist()
 
 def get_top_trading_volume(tickers: List[str], top_n: int = 10) -> List[str]:
-    """주어진 티커 목록 중 현재 기준 거래대금 상위 N개 추출"""
+    """(Deprecated) 주어진 티커 목록 중 현재 기준 거래대금 상위 N개 추출"""
+    return get_top_n_by_criteria(tickers, criteria='Amount', top_n=top_n)
+
+def get_top_n_by_criteria(tickers: List[str], criteria: str = 'Amount', top_n: int = 10, ascending: bool = False) -> List[str]:
+    """주어진 티커 목록 중 특정 기준 상위 N개 추출"""
     df = get_metadata()
     filtered_df = df[df['Code'].isin(tickers)]
-    return filtered_df.sort_values(by='Amount', ascending=False).head(top_n)['Code'].tolist()
+    return filtered_df.sort_values(by=criteria, ascending=ascending).head(top_n)['Code'].tolist()
 
 # --- 일봉 데이터 캐싱 파이프라인 ---
 
