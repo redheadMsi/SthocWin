@@ -1,0 +1,8 @@
+서버 실행 
+.venv/bin/streamlit run app.py
+
+웹 실행
+http://localhost:8501/
+
+.venv/bin/streamlit run app.py
+http://localhost:8501/
